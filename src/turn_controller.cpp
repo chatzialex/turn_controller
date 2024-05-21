@@ -54,15 +54,22 @@ public:
   bool followTrajectory(const PoseArray &goals);
 
 private:
+  struct State {
+    double theta;
+    double x;
+    double y;
+    double dtheta;
+  };
+
   constexpr static char kCommandVelocityTopicName[]{"cmd_vel"};
   constexpr static char kNodeName[]{"distance_controller"};
   constexpr static char kOdometryTopicName[]{"/odometry/filtered"};
 
-  constexpr static double kAngleTolerance{0.1}; // [rad]
-  constexpr static auto kControlCycle{10ms};
-  constexpr static double kPGain{/* TODO */};
-  constexpr static double kIGain{/* TODO */};
-  constexpr static double kDGain{/* TODO */};
+  constexpr static double kAngleTolerance{0.02}; // [rad]
+  constexpr static auto kControlCycle{100ms};
+  constexpr static double kIGain{0.01};
+  constexpr static double kPGain{2.0};
+  constexpr static double kDGain{0.3};
 
   void odomSubCb(const std::shared_ptr<const Odometry> msg);
   bool goToPoint(const Pose &goal);
@@ -70,34 +77,46 @@ private:
   rclcpp::Subscription<Odometry>::SharedPtr odom_sub_{};
   rclcpp::Publisher<Twist>::SharedPtr twist_pub_{};
 
-  std::optional<double> theta_cur_{std::nullopt};
+  std::optional<struct State> state_cur_{std::nullopt};
 };
 
 void TurnController::odomSubCb(const std::shared_ptr<const Odometry> msg) {
-  theta_cur_ = getYaw(msg->pose.pose.orientation);
+  state_cur_ = {getYaw(msg->pose.pose.orientation), msg->pose.pose.position.x,
+                msg->pose.pose.position.y, msg->twist.twist.angular.z};
 }
 
 bool TurnController::goToPoint(const Pose &goal) {
-  const auto theta_goal{getYaw(goal.orientation)};
+  const auto pid_step{[this](auto e, auto de, auto ie) {
+    return kPGain * e + kDGain * de + kIGain * ie;
+  }};
 
-  RCLCPP_INFO(this->get_logger(), "Received new goal: theta=%f", theta_goal);
-
-  while (!theta_cur_) {
+  while (!state_cur_) {
     RCLCPP_WARN(this->get_logger(), "Odometry not received yet, waiting...");
     rclcpp::sleep_for(1s);
   }
 
-  double dtheta{};
-  while (true) {
-    // TODO: dtheta =    
+  const auto theta_goal{std::atan2(goal.position.y - state_cur_.value().y,
+                                   goal.position.x - state_cur_.value().x)};
 
-    if (dtheta <= kAngleTolerance) {
+  RCLCPP_INFO(this->get_logger(), "Received new goal: theta=%f [rad]",
+              theta_goal);
+
+  double e_theta{}, de_theta, ie_theta{0.0};
+  Twist v_d{};
+  while (true) {
+    e_theta = std::atan2(std::sin(theta_goal - state_cur_.value().theta),
+                         std::cos(theta_goal - state_cur_.value().theta));
+    de_theta = /* dtheta_goal = 0 */ -state_cur_.value().dtheta;
+
+    if (std::abs(e_theta) <= kAngleTolerance) {
       twist_pub_->publish(Twist{});
       RCLCPP_INFO(this->get_logger(), "Reached waypoint.");
       return true;
     }
 
-    /* TODO: implement control cycle*/
+    v_d.angular.z = pid_step(e_theta, de_theta, ie_theta);
+    ie_theta += std::chrono::duration<double>{kControlCycle}.count() * e_theta;
+    twist_pub_->publish(v_d);
 
     rclcpp::sleep_for(kControlCycle);
   }
@@ -129,7 +148,19 @@ int main(int argc, char **argv) {
     PoseArray goal_poses;
     Pose goal_pose{};
 
-    /* TODO */
+    // w3
+    goal_pose.position.x = 0.574;
+    goal_pose.position.y = -1.454;
+    goal_poses.poses.push_back(goal_pose);
+
+    // w7
+    goal_pose.position.x = 1.767;
+    goal_pose.position.y = -0.432;
+    goal_poses.poses.push_back(goal_pose);
+
+    goal_pose.position.x = 0.698;
+    goal_pose.position.y = 0.548;
+    goal_poses.poses.push_back(goal_pose);
 
     return goal_poses;
   }()};
