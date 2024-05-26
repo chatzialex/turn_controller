@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 
 using Pose = geometry_msgs::msg::Pose;
 using PoseArray = geometry_msgs::msg::PoseArray;
@@ -39,14 +40,29 @@ double getYaw(const Quaternion &quaternion) {
 
 class TurnController : public rclcpp::Node {
 public:
-  TurnController(const std::string &node_name = kNodeName,
+  TurnController(int scene_number, const std::string &node_name = kNodeName,
                  const rclcpp::NodeOptions &options = rclcpp::NodeOptions{})
-      : Node{node_name, options}, odom_sub_{this->create_subscription<Odometry>(
-                                      kOdometryTopicName, 1,
-                                      std::bind(&TurnController::odomSubCb,
-                                                this, std::placeholders::_1))},
+      : Node{node_name, options}, scene_number_{scene_number},
+        odom_sub_{this->create_subscription<Odometry>(
+            kOdometryTopicName, 1,
+            std::bind(&TurnController::odomSubCb, this,
+                      std::placeholders::_1))},
         twist_pub_{
             this->create_publisher<Twist>(kCommandVelocityTopicName, 1)} {
+    if (scene_number_ != 1 && scene_number_ != 2) {
+      throw std::runtime_error("[TurnController::TurnController()] "
+                               "scene_number can only be 1 or 2.");
+    }
+
+    if (scene_number_ == 1) {
+      kIGain = 0.01;
+      kPGain = 2.0;
+      kDGain = 0.3;
+    } else if (scene_number_ == 2) {
+      kIGain = 0.01;
+      kPGain = 1.0;
+      kDGain = 0.3;
+    }
 
     RCLCPP_INFO(this->get_logger(), "%s node started.", node_name.c_str());
   }
@@ -66,10 +82,13 @@ private:
   constexpr static char kOdometryTopicName[]{"/odometry/filtered"};
 
   constexpr static double kAngleTolerance{0.02}; // [rad]
-  constexpr static auto kControlCycle{100ms};
-  constexpr static double kIGain{0.01};
-  constexpr static double kPGain{2.0};
-  constexpr static double kDGain{0.3};
+  constexpr static auto kControlCycle{50ms};
+
+  int scene_number_{};
+
+  double kIGain{};
+  double kPGain{};
+  double kDGain{};
 
   void odomSubCb(const std::shared_ptr<const Odometry> msg);
   bool goToPoint(const Pose &goal);
@@ -137,17 +156,11 @@ bool TurnController::followTrajectory(const PoseArray &goals) {
 
 } // namespace TurnController
 
-int main(int argc, char **argv) {
-  rclcpp::init(argc, argv);
-  auto node{std::make_shared<TurnController::TurnController>()};
-  rclcpp::executors::SingleThreadedExecutor executor;
-  executor.add_node(node);
-  auto executor_thread{std::thread([&executor]() { executor.spin(); })};
+PoseArray createGoals(int scene_number) {
+  PoseArray goal_poses;
+  Pose goal_pose{};
 
-  const auto goals{[] {
-    PoseArray goal_poses;
-    Pose goal_pose{};
-
+  if (scene_number == 1) {
     // w3
     goal_pose.position.x = 0.574;
     goal_pose.position.y = -1.454;
@@ -161,9 +174,41 @@ int main(int argc, char **argv) {
     goal_pose.position.x = 0.698;
     goal_pose.position.y = 0.548;
     goal_poses.poses.push_back(goal_pose);
+  } else if (scene_number == 2) {
+    // waypoint 1
+    goal_pose.position.x = 0.985;
+    goal_pose.position.y = 0.867;
+    goal_poses.poses.push_back(goal_pose);
 
-    return goal_poses;
-  }()};
+    // waypoint 2
+    goal_pose.position.x = 2.797;
+    goal_pose.position.y = 0.041;
+    goal_poses.poses.push_back(goal_pose);
+  } else {
+    throw std::runtime_error(
+        "[createGoals()] scene_number can only be 1 or 2.");
+  }
+  return goal_poses;
+}
+
+int main(int argc, char **argv) {
+  rclcpp::init(argc, argv);
+
+  int scene_number{1};
+  if (argc > 1) {
+    scene_number = std::atoi(argv[1]);
+  }
+  if (scene_number != 1 && scene_number != 2) {
+    throw std::runtime_error(
+        "[TurnController::TurnController()] scene_number can only be 1 or 2.");
+  }
+
+  auto node{std::make_shared<TurnController::TurnController>(scene_number)};
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+  auto executor_thread{std::thread([&executor]() { executor.spin(); })};
+
+  const auto goals{createGoals(scene_number)};
   node->followTrajectory(goals);
 
   if (executor_thread.joinable()) {
